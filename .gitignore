@@ -1,0 +1,9 @@
+.DS_Store
+__pycache__/
+*.pyc
+
+outputs/
+data/prices.csv
+
+# Keep the processed membership files, but ignore ad hoc local notes if added later.
+notebooks/.ipynb_checkpoints/

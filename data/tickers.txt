@@ -1,0 +1,6 @@
+# Optional custom universe.
+# Put one ticker per line if you want to download your own stock list instead of the default S&P 500 source.
+# Example:
+# AAPL
+# MSFT
+# NVDA
