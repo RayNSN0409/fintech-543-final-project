@@ -36,10 +36,33 @@ def main():
     chart_path = plot_portfolio_value(results)
 
     print("Baseline backtest summary")
+    print(
+        f"Momentum method: {config.MOMENTUM_METHOD} | "
+        f"Score mode: {config.MOMENTUM_SCORE_MODE} | "
+        f"Lookback: {config.LOOKBACK_DAYS} | "
+        f"EWMA halflife: {config.EWMA_HALFLIFE_DAYS}"
+    )
+    print(f"Rebalance weekday (0=Mon,...,4=Fri): {config.REBALANCE_WEEKDAY}")
+    print(
+        f"Target vol: {config.TARGET_ANNUAL_VOLATILITY:.2%} | "
+        f"Max gross leverage: {config.MAX_GROSS_LEVERAGE:.2f} | "
+        f"Min signal price: {config.MIN_SIGNAL_PRICE:.2f}"
+    )
+    print(
+        f"Base long/short: {config.LONG_BOOK_WEIGHT:.2f}/{config.SHORT_BOOK_WEIGHT:.2f} | "
+        f"Trend switch: {config.USE_BENCHMARK_TREND_SWITCH}"
+    )
     if membership is not None:
         print("Using dynamic universe membership from data/universe_membership.csv")
     else:
         print("No dynamic universe file found; using all tickers present in prices.csv")
+
+    if len(results) < config.MIN_BACKTEST_TRADING_DAYS:
+        print(
+            "WARNING: Backtest window is shorter than 4 weeks of trading days "
+            f"({len(results)} < {config.MIN_BACKTEST_TRADING_DAYS})."
+        )
+
     for key, value in format_summary(summary).items():
         print(f"{key:<28} {value}")
     print(f"\nDaily results saved to: {config.OUTPUT_DIR / 'baseline_daily_results.csv'}")

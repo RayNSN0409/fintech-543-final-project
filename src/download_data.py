@@ -1,6 +1,7 @@
 from pathlib import Path
 from io import StringIO
 from urllib.request import Request, urlopen
+import re
 
 import pandas as pd
 import yfinance as yf
@@ -11,6 +12,22 @@ from . import config
 DEFAULT_START_DATE = config.START_DATE
 DEFAULT_END_DATE = config.END_DATE
 DEFAULT_TICKER_SOURCE = "sp500"
+
+
+TICKER_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9.-]{0,14}$")
+
+
+def _sanitize_tickers(raw_tickers):
+    clean = []
+    for value in raw_tickers:
+        ticker = str(value).upper().replace(".", "-").strip()
+        # Remove common annotation fragments seen in historical membership files.
+        ticker = ticker.split(" ")[0]
+        ticker = ticker.split("(")[0]
+        ticker = ticker.strip("-_")
+        if ticker and TICKER_PATTERN.match(ticker):
+            clean.append(ticker)
+    return sorted(set(clean + [config.BENCHMARK_TICKER]))
 
 
 def load_tickers_from_file(ticker_file=config.TICKER_FILE):
@@ -26,7 +43,7 @@ def load_tickers_from_file(ticker_file=config.TICKER_FILE):
     if not tickers:
         raise ValueError("Ticker file is empty.")
 
-    return tickers
+    return _sanitize_tickers(tickers)
 
 
 def load_sp500_tickers():
@@ -44,8 +61,8 @@ def load_sp500_tickers():
         html = response.read().decode("utf-8")
 
     table = pd.read_html(StringIO(html))[0]
-    tickers = table["Symbol"].astype(str).str.replace(".", "-", regex=False).tolist()
-    return sorted(set(tickers + [config.BENCHMARK_TICKER]))
+    tickers = table["Symbol"].astype(str).tolist()
+    return _sanitize_tickers(tickers)
 
 
 def load_universe_tickers(universe_file=config.UNIVERSE_FILE):
@@ -53,8 +70,8 @@ def load_universe_tickers(universe_file=config.UNIVERSE_FILE):
     if "ticker" not in universe.columns:
         raise ValueError("Universe membership file must include a 'ticker' column.")
 
-    tickers = universe["ticker"].astype(str).str.upper().str.replace(".", "-", regex=False).tolist()
-    return sorted(set(tickers + [config.BENCHMARK_TICKER]))
+    tickers = universe["ticker"].astype(str).tolist()
+    return _sanitize_tickers(tickers)
 
 
 def get_tickers(source=DEFAULT_TICKER_SOURCE):

@@ -8,7 +8,10 @@ from . import config
 REQUIRED_COLUMNS = {"ticker", "start_date", "end_date"}
 
 
-def load_universe_membership(universe_file=config.UNIVERSE_FILE):
+def load_universe_membership(universe_file=None):
+    if universe_file is None:
+        universe_file = config.UNIVERSE_FILE
+
     universe_path = Path(universe_file)
     if not universe_path.exists():
         return None
@@ -31,6 +34,10 @@ def get_eligible_tickers(membership, signal_date):
         return None
 
     signal_date = pd.Timestamp(signal_date)
+    if signal_date > pd.Timestamp(membership["end_date"].max()):
+        # Membership file can lag recent dates; allow trading the refreshed ticker set for live operation.
+        return None
+
     eligible = membership.loc[
         (membership["start_date"] <= signal_date) & (membership["end_date"] >= signal_date),
         "ticker",
