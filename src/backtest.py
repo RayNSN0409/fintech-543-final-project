@@ -88,7 +88,72 @@ def _book_weights_for_signal_date(benchmark_close, signal_date):
     return config.BEAR_LONG_BOOK_WEIGHT, config.BEAR_SHORT_BOOK_WEIGHT
 
 
-def run_backtest(prices, membership=None):
+def _init_stop_state(weights, close_row):
+    state = {}
+    for ticker, weight in weights.items():
+        price = close_row.get(ticker, pd.NA)
+        if pd.isna(price) or price <= 0:
+            continue
+        state[ticker] = {
+            "side": 1 if weight > 0 else -1,
+            "entry": float(price),
+            "peak": float(price),
+            "trough": float(price),
+        }
+    return state
+
+
+def _evaluate_position_stops(current_weights, close_row, stop_state, stop_config):
+    fixed_stop = float(stop_config.get("fixed_position_stop_pct", 0.0) or 0.0)
+    if fixed_stop <= 0:
+        return set()
+
+    triggered = set()
+    for ticker, weight in current_weights.items():
+        if ticker not in stop_state:
+            continue
+
+        price = close_row.get(ticker, pd.NA)
+        if pd.isna(price) or price <= 0:
+            continue
+
+        info = stop_state[ticker]
+        side = info["side"]
+        entry = info["entry"]
+
+        # Track extrema for diagnostics.
+        info["peak"] = max(info["peak"], float(price))
+        info["trough"] = min(info["trough"], float(price))
+
+        if side > 0:
+            loss_since_entry = float(price / entry - 1.0)
+            fixed_hit = fixed_stop > 0 and loss_since_entry <= -fixed_stop
+        else:
+            loss_since_entry = float(entry / price - 1.0)
+            fixed_hit = fixed_stop > 0 and loss_since_entry <= -fixed_stop
+
+        if fixed_hit:
+            triggered.add(ticker)
+
+    return triggered
+
+
+def run_backtest(prices, membership=None, stop_config=None):
+    if stop_config is None:
+        stop_config = {
+            "fixed_position_stop_pct": (
+                float(config.FIXED_POSITION_STOP_PCT) if config.ENABLE_FIXED_POSITION_STOP else 0.0
+            )
+        }
+    else:
+        stop_config = dict(stop_config)
+
+    effective_start_date = stop_config.get("effective_start_date")
+    if effective_start_date:
+        effective_start_date = pd.Timestamp(effective_start_date).normalize()
+    else:
+        effective_start_date = None
+
     prices = prices.copy()
     close_wide, open_wide = _build_price_frames(prices)
     trading_dates = close_wide.index
@@ -116,7 +181,13 @@ def run_backtest(prices, membership=None):
         }
 
     current_weights = {}
+    stop_state = {}
+    pending_stop_tickers = set()
+
     portfolio_value = config.INITIAL_CAPITAL
+    portfolio_peak_value = config.INITIAL_CAPITAL
+    stop_position_events = 0
+
     records = []
     historical_net_returns = []
 
@@ -127,6 +198,12 @@ def run_backtest(prices, membership=None):
         leverage_multiplier = 0.0
         signal_date = pd.NaT
         is_rebalance_day = False
+
+        if pending_stop_tickers:
+            for ticker in pending_stop_tickers:
+                current_weights.pop(ticker, None)
+                stop_state.pop(ticker, None)
+            pending_stop_tickers.clear()
 
         if date in signal_frames_by_trade_date:
             rebalance_payload = signal_frames_by_trade_date[date]
@@ -145,6 +222,7 @@ def run_backtest(prices, membership=None):
             turnover = sum(abs(new_weights.get(t, 0.0) - current_weights.get(t, 0.0)) for t in all_tickers)
             trading_cost = turnover * (config.TRANSACTION_COST_BPS / 10000.0)
             current_weights = new_weights
+            stop_state = {}
         else:
             leverage_multiplier = sum(abs(weight) for weight in current_weights.values())
 
@@ -182,7 +260,28 @@ def run_backtest(prices, membership=None):
         net_return = daily_return - trading_cost - short_borrow_cost
         excess_return = net_return - benchmark_return
         portfolio_value *= 1.0 + net_return
+        portfolio_peak_value = max(portfolio_peak_value, portfolio_value)
+        portfolio_drawdown = float(portfolio_value / portfolio_peak_value - 1.0)
         historical_net_returns.append(net_return)
+
+        stop_triggers_today = 0
+
+        if is_rebalance_day and current_weights:
+            stop_state = _init_stop_state(current_weights, close_wide.loc[date])
+
+        stop_active_today = effective_start_date is None or date.normalize() >= effective_start_date
+
+        if stop_active_today and current_weights and stop_state:
+            triggered = _evaluate_position_stops(
+                current_weights=current_weights,
+                close_row=close_wide.loc[date],
+                stop_state=stop_state,
+                stop_config=stop_config,
+            )
+            if triggered:
+                pending_stop_tickers.update(triggered)
+                stop_position_events += len(triggered)
+                stop_triggers_today += len(triggered)
 
         records.append(
             {
@@ -206,6 +305,9 @@ def run_backtest(prices, membership=None):
                 "is_rebalance_day": int(is_rebalance_day),
                 "signal_date": signal_date,
                 "leverage_multiplier": leverage_multiplier,
+                "portfolio_drawdown": portfolio_drawdown,
+                "stop_triggers_today": int(stop_triggers_today),
+                "stop_position_events_cum": int(stop_position_events),
                 "portfolio_value": portfolio_value,
                 "portfolio_nav": portfolio_value / config.INITIAL_CAPITAL,
             }

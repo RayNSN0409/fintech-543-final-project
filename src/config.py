@@ -33,6 +33,12 @@ SHORT_BORROW_RATE_ANNUAL = 0.10
 LONG_BOOK_WEIGHT = 1.00
 SHORT_BOOK_WEIGHT = 0.00
 
+# Production stop-loss setting
+ENABLE_FIXED_POSITION_STOP = True
+FIXED_POSITION_STOP_PCT = 0.08
+# Live rollout date for stop-loss: keep earlier live records unchanged.
+STOP_LIVE_EFFECTIVE_DATE = "2026-03-30"
+
 # Optional benchmark-trend-based exposure tilting
 USE_BENCHMARK_TREND_SWITCH = False
 TREND_LOOKBACK_DAYS = 50

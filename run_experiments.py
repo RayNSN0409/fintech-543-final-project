@@ -1,2 +1,2 @@
-"""Reserved for running parameter sweeps and filter experiments."""
+"""Reserved for future parameter sweeps and research experiments."""
 

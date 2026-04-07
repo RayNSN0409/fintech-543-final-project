@@ -92,6 +92,17 @@ Current weighting setup:
 - Holding period: until next weekly rebalance.
 - Rebalance rule: full refresh of ranks and target weights at each cycle.
 
+Stop-loss policy (adopted in production):
+- Type: fixed single-name stop-loss.
+- Threshold: 8% from each position's entry reference.
+- Scope: long sleeve positions.
+- Trigger behavior: if the threshold is breached, the position is exited from the next trading day and remains out until the next scheduled rebalance rebuilds target weights.
+- Live rollout date: 2026-03-30.
+
+Rollout convention:
+- Live operations: stop-loss is active from the rollout date forward only, so historical live records before rollout remain unchanged.
+- Historical research reports (yearly package): can be recomputed under full-history stop-loss for analytical comparison and documentation.
+
 Cost model:
 - Transaction cost: no rebalancing fee (set to 0 bps).
 - Borrow cost for shorts:
@@ -166,6 +177,7 @@ Current frozen parameter set:
 - Signal: EWMA momentum, raw score, halflife = 3
 - Selection size: `N_LONG = 15`, `N_SHORT = 0`
 - Book weights: long 100%, short 0%
+- Stop-loss: fixed 8% single-name stop (`ENABLE_FIXED_POSITION_STOP = True`, `FIXED_POSITION_STOP_PCT = 0.08`, `STOP_LIVE_EFFECTIVE_DATE = "2026-03-30"`)
 - Risk target: 18% annualized
 - Max gross leverage cap: 2.0
 - Minimum signal price filter: 5.0

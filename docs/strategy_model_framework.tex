@@ -1,0 +1,136 @@
+\documentclass[11pt]{article}
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{enumitem}
+
+\title{FINTECH 543 Final Project: Strategy Design and Financial Rationale}
+\author{Team Strategy Note}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Executive Summary}
+This project implements a short-horizon cross-sectional momentum strategy on a date-consistent S\&P 500 universe with weekly rebalancing, benchmark-relative evaluation, and explicit risk controls. The framework combines:
+\begin{itemize}[leftmargin=1.5em]
+    \item EWMA momentum ranking to overweight recent information,
+    \item dynamic index membership enforcement to control survivorship bias,
+    \item volatility targeting and leverage cap for risk budgeting,
+    \item a fixed 8\% single-name stop-loss as a downside control overlay.
+\end{itemize}
+
+\section{Investment Objective and Design Logic}
+\subsection{Objective}
+The objective is to test whether short-horizon cross-sectional momentum can generate persistent benchmark-relative return under realistic implementation constraints.
+
+\subsection{Design Logic}
+The strategy design follows three principles:
+\begin{enumerate}[leftmargin=1.5em]
+    \item \textbf{Alpha extraction}: rank stocks by recent trend strength (EWMA momentum).
+    \item \textbf{Implementation realism}: weekly signal/next-session execution with explicit frictions.
+    \item \textbf{Risk discipline}: volatility scaling, leverage cap, and stop-loss overlay.
+\end{enumerate}
+
+\section{Data Architecture and Bias Control}
+\subsection{Data Sources}
+Price inputs are daily open/close series from Yahoo Finance. The benchmark is SPY. Universe metadata is historical S\&P 500 constituent membership intervals.
+
+\subsection{Survivorship Bias: Definition and Why It Matters}
+Survivorship bias occurs when backtests are run on assets that survive to the end of the sample, while delisted or removed names are excluded. In equity strategies, this usually inflates historical performance by overrepresenting stronger firms.
+
+If one incorrectly defines a fixed universe as ``today's members only,'' then past investment opportunities are distorted. Formally, for date $t$, the valid tradable universe is $\mathcal{U}_t$ (membership at $t$), not $\mathcal{U}_T$ (membership at the end date $T$):
+\begin{equation}
+\mathcal{U}_t \neq \mathcal{U}_T, \quad t<T.
+\end{equation}
+
+Using $\mathcal{U}_T$ for all historical dates introduces a selection error and can materially bias both returns and risk estimates.
+
+\subsection{How This Project Controls Survivorship Bias}
+At each signal date, the model only ranks and trades securities that were active S\&P 500 constituents on that date. This is implemented by date-filtering against historical membership intervals.
+
+Practical controls include:
+\begin{itemize}[leftmargin=1.5em]
+    \item date-aware constituent eligibility checks,
+    \item strict-membership mode for fail-fast validation when coverage is stale,
+    \item daily membership refresh in operations to keep live eligibility aligned.
+\end{itemize}
+
+Residual limitation: historical index files may still contain vendor-level lag or revision noise. This is disclosed as a data risk rather than ignored.
+
+\section{Signal and Portfolio Construction}
+\subsection{Signal Engine: EWMA Cross-Sectional Momentum}
+For stock $i$ at date $t$, daily return is:
+\begin{equation}
+r_{i,t}=\frac{C_{i,t}}{C_{i,t-1}}-1.
+\end{equation}
+
+Momentum score is EWMA-weighted recent return information:
+\begin{equation}
+\text{Score}_{i,t}=\sum_{k=0}^{K-1} w_k r_{i,t-k}, \quad
+w_k=(1-\lambda)\lambda^k, \quad \sum_{k=0}^{K-1} w_k=1.
+\end{equation}
+
+The portfolio ranks assets by $\text{Score}_{i,t}$ and selects top-ranked names for long exposure.
+
+\subsection{Portfolio Formation and Execution}
+Current production setup is long-only top-$N$ (top 15 names), with weekly signal generation and next-session execution. Positions are refreshed at each rebalance cycle.
+
+\section{Risk Framework and Stop-Loss Policy}
+\subsection{Volatility Budgeting}
+Target daily volatility is scaled from annual target:
+\begin{equation}
+\sigma_{\text{target,daily}}=\frac{\sigma_{\text{target,annual}}}{\sqrt{252}}.
+\end{equation}
+
+At rebalance, raw weights are scaled toward target risk and clipped by a gross leverage cap.
+
+\subsection{Transaction and Financing Frictions}
+Net return is:
+\begin{equation}
+r_t^{\text{net}}=r_t^{\text{gross}}-\text{Cost}_t^{\text{trade}}-\text{Cost}_t^{\text{borrow}}.
+\end{equation}
+
+Excess return versus SPY is:
+\begin{equation}
+r_t^{\text{excess}}=r_t^{\text{net}}-r_t^{\text{SPY}}.
+\end{equation}
+
+\subsection{Adopted Stop-Loss Overlay}
+The strategy adopts a fixed 8\% single-name stop-loss in production:
+\begin{itemize}[leftmargin=1.5em]
+    \item Trigger: if position loss from entry reference reaches 8\%,
+    \item Action: close that position at the next trade opportunity,
+    \item Re-entry: only through the next scheduled rebalance and rank reconstruction.
+\end{itemize}
+
+Rollout governance:
+\begin{itemize}[leftmargin=1.5em]
+    \item Live effective date: 2026-03-30 (no retroactive change to prior live logs),
+    \item Historical research reports may be recomputed with full-history stop-loss for apples-to-apples comparison.
+\end{itemize}
+
+\section{Financial Rationale}
+The framework is grounded in established portfolio and factor-investing principles:
+\begin{enumerate}[leftmargin=1.5em]
+    \item \textbf{Behavioral underreaction and trend continuation}: short-horizon momentum captures delayed information diffusion.
+    \item \textbf{Cross-sectional relative value}: ranking names against peers improves signal efficiency versus absolute forecasting.
+    \item \textbf{Risk budgeting over raw conviction}: volatility targeting and leverage caps stabilize risk per unit exposure.
+    \item \textbf{Tail-risk containment}: fixed stop-loss aims to reduce left-tail outcomes and drawdown persistence.
+    \item \textbf{Benchmark-aware evaluation}: excess return, information ratio, and drawdown are prioritized over raw return alone.
+\end{enumerate}
+
+\section{Implementation Governance and Practical Contribution}
+Relative to a plain classroom momentum backtest, this framework adds:
+\begin{itemize}[leftmargin=1.5em]
+    \item dynamic index-membership control to reduce survivorship bias,
+    \item production-style daily operations and weekly reporting discipline,
+    \item explicit rollout governance for policy changes (stop-loss activation date),
+    \item reproducible outputs for both live monitoring and annual performance attribution.
+\end{itemize}
+
+\section{Conclusion}
+The model is intentionally simple in core alpha logic and strict in implementation discipline. The combination of EWMA momentum, survivorship-bias control through dynamic membership, and layered risk management provides a coherent and defensible quantitative investment process for short-horizon deployment and academic evaluation.
+
+\end{document}

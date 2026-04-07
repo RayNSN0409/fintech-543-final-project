@@ -157,7 +157,13 @@ def _run_pipeline(strict_membership: bool = False) -> tuple[pd.DataFrame, pd.Ser
 
     membership = _resolve_membership_for_live(membership, latest_price_date)
 
-    results = run_backtest(prices, membership=membership)
+    stop_config = {
+        "fixed_position_stop_pct": (
+            float(config.FIXED_POSITION_STOP_PCT) if config.ENABLE_FIXED_POSITION_STOP else 0.0
+        ),
+        "effective_start_date": config.STOP_LIVE_EFFECTIVE_DATE,
+    }
+    results = run_backtest(prices, membership=membership, stop_config=stop_config)
     summary = compute_summary(results)
 
     results.to_csv(config.OUTPUT_DIR / "baseline_daily_results.csv", index=False)
