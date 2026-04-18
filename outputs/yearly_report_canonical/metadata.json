@@ -1,0 +1,15 @@
+{
+  "generated_at": "2026-03-28T23:07:06",
+  "data_window": {
+    "start_date": "2020-01-02",
+    "end_date": "2026-03-27"
+  },
+  "strategy": {
+    "stop_loss_enabled": true,
+    "fixed_position_stop_pct": 0.08,
+    "live_effective_start_date": "2026-03-23",
+    "historical_report_mode": "full-history stop applied"
+  },
+  "source_prices_file": "C:\\Users\\RAYNSN\\Desktop\\QIA\\Shared Final Project WP\\fintech-543-final-project\\data\\prices.csv",
+  "source_membership_file": "C:\\Users\\RAYNSN\\Desktop\\QIA\\Shared Final Project WP\\fintech-543-final-project\\data\\universe_membership.csv"
+}
