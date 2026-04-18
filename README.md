@@ -85,6 +85,26 @@ Current weighting setup:
 - Portfolio size target: top 15 names at each rebalance
 - This is the current return-first configuration while keeping the weighted (EWMA) signal requirement.
 
+### Improved Model (Diversified Holdings Control)
+
+To reduce concentration risk, this repository also keeps an improved model as a side-by-side control.
+
+Core idea:
+- Keep the same signal framework (EWMA momentum).
+- Keep the same rebalance frequency (weekly rebalance, next-open execution).
+- Increase cross-sectional breadth at each rebalance.
+
+Current improved-model overrides:
+- `N_LONG = 30`
+- `MIN_UNIQUE_SECURITIES = 20`
+- Model tag in daily log: `improved_diversified`
+
+Why this helps:
+- Lower single-name concentration: each position has smaller weight, reducing idiosyncratic drawdown impact.
+- Better cross-sectional coverage: more names capture broader momentum dispersion instead of relying on a small cluster.
+- More stable path under shocks: diversified holdings typically reduce return variance from isolated events.
+- Better robustness for presentation: baseline vs improved side-by-side evidence makes the risk/return trade-off more transparent.
+
 ## 6. Trading Rules
 
 - Signal time: weekly close (end of week).
@@ -208,6 +228,14 @@ Daily command:
 ```
 python run_daily_simulation.py
 ```
+
+Improved-model daily command:
+
+```
+python run_daily_simulation_improved.py
+```
+
+Running both commands each day will append two rows (baseline + improved) into `outputs/simulation/daily_log.csv` with model labels.
 
 By default, this command now refreshes `data/prices.csv` from Yahoo incrementally (up to the latest market date), then runs the strategy on the newest available data.
 It also refreshes the S&P 500 membership snapshot daily and rebuilds `data/universe_membership.csv` so membership coverage advances with the latest run date.

@@ -9,9 +9,7 @@ import pandas as pd
 from src import config
 from src.backtest import run_backtest
 from src.data_loader import filter_date_range, load_prices
-from src.download_data import download_prices, get_tickers, save_prices
 from src.metrics import compute_summary
-from src.prepare_universe_membership import refresh_membership_files
 from src.plotting import plot_live_portfolio_value, plot_portfolio_value
 from src.signals import add_momentum_signal
 from src.universe import load_universe_membership
@@ -26,6 +24,12 @@ TRADES_HISTORY_FILE = SIM_DIR / "trades_history.csv"
 POSITIONS_HISTORY_FILE = SIM_DIR / "positions_history.csv"
 LIVE_PLOT_FILE = SIM_DIR / "portfolio_value_live.png"
 DATA_QUALITY_FILE = SIM_DIR / "data_quality_log.csv"
+
+
+def _sanitize_model_tag(value: str) -> str:
+    text = str(value).strip().lower().replace(" ", "_")
+    safe = "".join(ch for ch in text if ch.isalnum() or ch in {"_", "-"})
+    return safe or "model"
 
 
 def _ensure_dirs() -> None:
@@ -43,6 +47,8 @@ def _refresh_membership_snapshot(enabled: bool = True) -> tuple[pd.Timestamp | N
     if not enabled:
         return None, None
 
+    from src.prepare_universe_membership import refresh_membership_files
+
     previous_max = None
     if config.UNIVERSE_FILE.exists():
         previous = pd.read_csv(config.UNIVERSE_FILE)
@@ -55,6 +61,8 @@ def _refresh_membership_snapshot(enabled: bool = True) -> tuple[pd.Timestamp | N
 
 
 def _refresh_prices_incremental(ticker_source: str = "sp500") -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
+    from src.download_data import download_prices, get_tickers, save_prices
+
     existing = None
     old_max_date = None
 
@@ -128,7 +136,11 @@ def _get_membership_coverage_status(
     }
 
 
-def _run_pipeline(strict_membership: bool = False) -> tuple[pd.DataFrame, pd.Series, pd.Timestamp, dict[str, object]]:
+def _run_pipeline(
+    strict_membership: bool = False,
+    config_overrides: dict[str, object] | None = None,
+    result_tag: str = "baseline",
+) -> tuple[pd.DataFrame, pd.Series, pd.Timestamp, dict[str, object]]:
     prices = load_prices()
     raw_latest_date = pd.Timestamp(prices[config.DATE_COL].max())
     rolling_start_date = max(pd.Timestamp(config.START_DATE), raw_latest_date - pd.Timedelta(days=420))
@@ -157,25 +169,37 @@ def _run_pipeline(strict_membership: bool = False) -> tuple[pd.DataFrame, pd.Ser
 
     membership = _resolve_membership_for_live(membership, latest_price_date)
 
-    stop_config = {
-        "fixed_position_stop_pct": (
-            float(config.FIXED_POSITION_STOP_PCT) if config.ENABLE_FIXED_POSITION_STOP else 0.0
-        ),
-        "effective_start_date": config.STOP_LIVE_EFFECTIVE_DATE,
-    }
-    results = run_backtest(prices, membership=membership, stop_config=stop_config)
-    summary = compute_summary(results)
+    overrides = dict(config_overrides or {})
+    original_values = {name: getattr(config, name) for name in overrides}
+    safe_tag = _sanitize_model_tag(result_tag)
 
-    results.to_csv(config.OUTPUT_DIR / "baseline_daily_results.csv", index=False)
-    summary.to_frame(name="value").to_csv(config.OUTPUT_DIR / "baseline_summary.csv")
-    plot_portfolio_value(results)
+    try:
+        for name, value in overrides.items():
+            setattr(config, name, value)
+
+        stop_config = {
+            "fixed_position_stop_pct": (
+                float(config.FIXED_POSITION_STOP_PCT) if config.ENABLE_FIXED_POSITION_STOP else 0.0
+            ),
+            "effective_start_date": config.STOP_LIVE_EFFECTIVE_DATE,
+        }
+        results = run_backtest(prices, membership=membership, stop_config=stop_config)
+        summary = compute_summary(results)
+    finally:
+        for name, value in original_values.items():
+            setattr(config, name, value)
+
+    results.to_csv(config.OUTPUT_DIR / f"{safe_tag}_daily_results.csv", index=False)
+    summary.to_frame(name="value").to_csv(config.OUTPUT_DIR / f"{safe_tag}_summary.csv")
+    plot_portfolio_value(results, output_file=config.OUTPUT_DIR / f"{safe_tag}_portfolio_value.png")
 
     return results, summary, latest_price_date, coverage_status
 
 
-def _build_live_log_row(results: pd.DataFrame) -> pd.DataFrame:
+def _build_live_log_row(results: pd.DataFrame, model_name: str) -> pd.DataFrame:
     latest = results.iloc[[-1]].copy()
     latest["run_timestamp"] = pd.Timestamp.now().isoformat()
+    latest["model_name"] = str(model_name)
     latest_date = pd.Timestamp(latest.iloc[0]["date"]).normalize()
 
     latest_return = float(latest.iloc[0]["portfolio_return"])
@@ -208,6 +232,7 @@ def _build_live_log_row(results: pd.DataFrame) -> pd.DataFrame:
         "long_tickers",
         "short_tickers",
         "weights_json",
+        "model_name",
     ]
     latest = latest[cols]
 
@@ -215,15 +240,20 @@ def _build_live_log_row(results: pd.DataFrame) -> pd.DataFrame:
     if DAILY_LOG_FILE.exists():
         existing = pd.read_csv(DAILY_LOG_FILE, parse_dates=["date"], keep_default_na=False)
         if not existing.empty:
-            existing_dates = pd.to_datetime(existing["date"]).dt.normalize()
-            same_day = existing.loc[existing_dates == latest_date]
+            if "model_name" not in existing.columns:
+                existing["model_name"] = "baseline"
+
+            same_model = existing.loc[existing["model_name"].astype(str) == str(model_name)].copy()
+            same_dates = pd.to_datetime(same_model["date"]).dt.normalize()
+            same_day = same_model.loc[same_dates == latest_date]
             if not same_day.empty:
                 prev_same_value = float(same_day.iloc[-1]["portfolio_value"])
                 prev_same_return = float(same_day.iloc[-1]["portfolio_return"])
                 denom = 1.0 + prev_same_return
                 prior_value = prev_same_value / denom if denom > 0 else config.INITIAL_CAPITAL
             else:
-                prior_value = float(existing.iloc[-1]["portfolio_value"])
+                if not same_model.empty:
+                    prior_value = float(same_model.iloc[-1]["portfolio_value"])
 
     if prior_value <= 0 or prior_value > config.INITIAL_CAPITAL * 100:
         prior_value = config.INITIAL_CAPITAL
@@ -234,13 +264,19 @@ def _build_live_log_row(results: pd.DataFrame) -> pd.DataFrame:
     return latest
 
 
-def _update_daily_log(results: pd.DataFrame) -> pd.DataFrame:
-    latest = _build_live_log_row(results)
+def _update_daily_log(results: pd.DataFrame, model_name: str) -> pd.DataFrame:
+    latest = _build_live_log_row(results, model_name=model_name)
 
     if DAILY_LOG_FILE.exists():
         existing = pd.read_csv(DAILY_LOG_FILE, parse_dates=["date"], keep_default_na=False)
+        if "model_name" not in existing.columns:
+            existing["model_name"] = "baseline"
         combined = pd.concat([existing, latest], ignore_index=True)
-        combined = combined.sort_values("date").drop_duplicates(subset=["date"], keep="last")
+        combined = (
+            combined.sort_values(["date", "model_name", "run_timestamp"])
+            .drop_duplicates(subset=["date", "model_name"], keep="last")
+            .reset_index(drop=True)
+        )
     else:
         combined = latest
 
@@ -271,14 +307,17 @@ def _parse_weights_json(weights_json: str) -> dict[str, float]:
     return {str(k): float(v) for k, v in parsed.items()}
 
 
-def _update_latest_trades_file(daily_log: pd.DataFrame) -> pd.DataFrame:
-    latest = daily_log.iloc[-1]
+def _update_latest_trades_file(daily_log: pd.DataFrame, model_name: str) -> pd.DataFrame:
+    model_log = daily_log.loc[daily_log["model_name"].astype(str) == str(model_name)].copy()
+    if model_log.empty:
+        model_log = daily_log.copy()
+    latest = model_log.iloc[-1]
     latest_date = pd.Timestamp(latest["date"]).date()
     curr_weights = _parse_weights_json(latest.get("weights_json", "{}"))
 
     prev_weights = {}
-    if len(daily_log) > 1:
-        prev = daily_log.iloc[-2]
+    if len(model_log) > 1:
+        prev = model_log.iloc[-2]
         prev_weights = _parse_weights_json(prev.get("weights_json", "{}"))
 
     tickers = sorted(set(prev_weights) | set(curr_weights))
@@ -301,6 +340,7 @@ def _update_latest_trades_file(daily_log: pd.DataFrame) -> pd.DataFrame:
         rows.append(
             {
                 "date": latest_date.isoformat(),
+                "model_name": str(model_name),
                 "ticker": ticker,
                 "action": action,
                 "from_weight": from_w,
@@ -315,6 +355,7 @@ def _update_latest_trades_file(daily_log: pd.DataFrame) -> pd.DataFrame:
             [
                 {
                     "date": latest_date.isoformat(),
+                    "model_name": str(model_name),
                     "ticker": "(none)",
                     "action": "NO_CHANGE",
                     "from_weight": 0.0,
@@ -334,18 +375,24 @@ def _append_trades_history(trades: pd.DataFrame, daily_log: pd.DataFrame) -> pd.
 
     if TRADES_HISTORY_FILE.exists():
         history = pd.read_csv(TRADES_HISTORY_FILE, keep_default_na=False)
+        if "model_name" not in history.columns:
+            history["model_name"] = "baseline"
         combined = pd.concat([history, current], ignore_index=True)
-        combined = combined.drop_duplicates(subset=["date", "ticker"], keep="last")
+        combined = combined.drop_duplicates(subset=["date", "model_name", "ticker"], keep="last")
     else:
         combined = current
 
-    combined = combined.sort_values(["date", "ticker"]).reset_index(drop=True)
+    combined = combined.sort_values(["date", "model_name", "ticker"]).reset_index(drop=True)
     combined.to_csv(TRADES_HISTORY_FILE, index=False)
     return combined
 
 
-def _append_positions_history(daily_log: pd.DataFrame) -> pd.DataFrame:
-    latest = daily_log.iloc[-1]
+def _append_positions_history(daily_log: pd.DataFrame, model_name: str) -> pd.DataFrame:
+    model_log = daily_log.loc[daily_log["model_name"].astype(str) == str(model_name)].copy()
+    if model_log.empty:
+        model_log = daily_log.copy()
+
+    latest = model_log.iloc[-1]
     run_timestamp = str(latest["run_timestamp"])
     date_str = pd.Timestamp(latest["date"]).date().isoformat()
     weights = _parse_weights_json(latest.get("weights_json", "{}"))
@@ -357,6 +404,7 @@ def _append_positions_history(daily_log: pd.DataFrame) -> pd.DataFrame:
             {
                 "date": date_str,
                 "run_timestamp": run_timestamp,
+                "model_name": str(model_name),
                 "ticker": ticker,
                 "weight": float(weight),
                 "side": side,
@@ -368,6 +416,7 @@ def _append_positions_history(daily_log: pd.DataFrame) -> pd.DataFrame:
             {
                 "date": date_str,
                 "run_timestamp": run_timestamp,
+                "model_name": str(model_name),
                 "ticker": "(none)",
                 "weight": 0.0,
                 "side": "flat",
@@ -378,12 +427,14 @@ def _append_positions_history(daily_log: pd.DataFrame) -> pd.DataFrame:
 
     if POSITIONS_HISTORY_FILE.exists():
         history = pd.read_csv(POSITIONS_HISTORY_FILE, keep_default_na=False)
+        if "model_name" not in history.columns:
+            history["model_name"] = "baseline"
         combined = pd.concat([history, current], ignore_index=True)
-        combined = combined.drop_duplicates(subset=["date", "ticker"], keep="last")
+        combined = combined.drop_duplicates(subset=["date", "model_name", "ticker"], keep="last")
     else:
         combined = current
 
-    combined = combined.sort_values(["date", "ticker"]).reset_index(drop=True)
+    combined = combined.sort_values(["date", "model_name", "ticker"]).reset_index(drop=True)
     combined.to_csv(POSITIONS_HISTORY_FILE, index=False)
     return combined
 
@@ -394,8 +445,13 @@ def _update_data_quality_log(
     ticker_source: str,
     strict_membership: bool,
     coverage_status: dict[str, object],
+    model_name: str,
 ) -> pd.DataFrame:
-    latest = daily_log.iloc[-1]
+    model_log = daily_log.loc[daily_log["model_name"].astype(str) == str(model_name)].copy()
+    if model_log.empty:
+        model_log = daily_log.copy()
+
+    latest = model_log.iloc[-1]
     max_end = coverage_status.get("membership_max_end_date", pd.NaT)
     if pd.isna(max_end):
         max_end_text = ""
@@ -407,6 +463,7 @@ def _update_data_quality_log(
             {
                 "date": pd.Timestamp(latest["date"]).date().isoformat(),
                 "run_timestamp": str(latest["run_timestamp"]),
+                "model_name": str(model_name),
                 "latest_market_date": latest_price_date.date().isoformat(),
                 "ticker_source": ticker_source,
                 "strict_membership": int(strict_membership),
@@ -421,12 +478,14 @@ def _update_data_quality_log(
 
     if DATA_QUALITY_FILE.exists():
         existing = pd.read_csv(DATA_QUALITY_FILE, keep_default_na=False)
+        if "model_name" not in existing.columns:
+            existing["model_name"] = "baseline"
         combined = pd.concat([existing, row], ignore_index=True)
-        combined = combined.drop_duplicates(subset=["date"], keep="last")
+        combined = combined.drop_duplicates(subset=["date", "model_name"], keep="last")
     else:
         combined = row
 
-    combined = combined.sort_values("date").reset_index(drop=True)
+    combined = combined.sort_values(["date", "model_name"]).reset_index(drop=True)
     combined.to_csv(DATA_QUALITY_FILE, index=False)
     return combined
 
@@ -481,9 +540,10 @@ def _render_weekly_report(results: pd.DataFrame, summary: pd.Series) -> str:
     return "\n".join(lines)
 
 
-def _write_weekly_report(results: pd.DataFrame, summary: pd.Series) -> Path:
+def _write_weekly_report(results: pd.DataFrame, summary: pd.Series, model_name: str) -> Path:
     latest_date = pd.Timestamp(results["date"].iloc[-1]).date()
-    report_path = WEEKLY_DIR / f"weekly_report_{latest_date.isoformat()}.md"
+    safe_model = _sanitize_model_tag(model_name)
+    report_path = WEEKLY_DIR / f"weekly_report_{latest_date.isoformat()}_{safe_model}.md"
     report_path.write_text(_render_weekly_report(results, summary), encoding="utf-8")
     return report_path
 
@@ -494,6 +554,9 @@ def main(
     ticker_source: str = "sp500",
     strict_membership: bool = False,
     refresh_membership: bool = True,
+    model_name: str = "baseline",
+    result_tag: str = "baseline",
+    config_overrides: dict[str, object] | None = None,
 ) -> None:
     _ensure_dirs()
 
@@ -507,27 +570,39 @@ def main(
         old_max_date, new_max_date = _refresh_prices_incremental(ticker_source=ticker_source)
 
     results, summary, latest_price_date, coverage_status = _run_pipeline(
-        strict_membership=strict_membership
+        strict_membership=strict_membership,
+        config_overrides=config_overrides,
+        result_tag=result_tag,
     )
 
-    daily_log = _update_daily_log(results)
+    daily_log = _update_daily_log(results, model_name=model_name)
+    model_log = daily_log.loc[daily_log["model_name"].astype(str) == str(model_name)].copy()
+    if model_log.empty:
+        model_log = daily_log.copy()
+
     _update_positions_file(results)
-    trades = _update_latest_trades_file(daily_log)
+    trades = _update_latest_trades_file(daily_log, model_name=model_name)
     trades_history = _append_trades_history(trades, daily_log)
-    positions_history = _append_positions_history(daily_log)
-    live_plot_path = plot_live_portfolio_value(daily_log, output_file=LIVE_PLOT_FILE)
+    positions_history = _append_positions_history(daily_log, model_name=model_name)
+    safe_model = _sanitize_model_tag(model_name)
+    live_plot_path = plot_live_portfolio_value(
+        model_log,
+        output_file=SIM_DIR / f"portfolio_value_live_{safe_model}.png",
+    )
     quality_log = _update_data_quality_log(
         daily_log=daily_log,
         latest_price_date=latest_price_date,
         ticker_source=ticker_source,
         strict_membership=strict_membership,
         coverage_status=coverage_status,
+        model_name=model_name,
     )
 
     latest_date = pd.Timestamp(results["date"].iloc[-1])
     should_write_weekly = force_weekly_report or (latest_date.weekday() == 4)
 
     print("Daily simulation updated")
+    print(f"Model name: {model_name}")
     if refresh_membership:
         print(
             "Membership refreshed: "
@@ -538,8 +613,8 @@ def main(
         print(f"Price data refreshed: old max={old_max_date.date() if old_max_date is not None else 'N/A'} | new max={new_max_date.date() if new_max_date is not None else 'N/A'}")
     print(f"Latest market data date: {latest_price_date.date()}")
     print(f"Latest date: {latest_date.date()}")
-    print(f"Portfolio value: ${float(daily_log.iloc[-1]['portfolio_value']):,.2f}")
-    print(f"Daily return: {float(daily_log.iloc[-1]['portfolio_return']):.4%}")
+    print(f"Portfolio value: ${float(model_log.iloc[-1]['portfolio_value']):,.2f}")
+    print(f"Daily return: {float(model_log.iloc[-1]['portfolio_return']):.4%}")
     print(f"Model total return (rolling window): {float(summary['total_return']):.4%}")
     print(f"Daily log rows: {len(daily_log)}")
     print(f"Daily log file: {DAILY_LOG_FILE}")
@@ -563,7 +638,7 @@ def main(
         )
 
     if should_write_weekly:
-        report_path = _write_weekly_report(results, summary)
+        report_path = _write_weekly_report(results, summary, model_name=model_name)
         print(f"Weekly report generated: {report_path}")
     else:
         print("Weekly report not generated today (use --force-weekly-report to generate).")
@@ -599,11 +674,43 @@ if __name__ == "__main__":
         action="store_true",
         help="Fail if membership file is missing/stale relative to latest market date.",
     )
+    parser.add_argument(
+        "--model-name",
+        default="baseline",
+        help="Model label written to daily_log.csv (e.g. baseline, improved_diversified).",
+    )
+    parser.add_argument(
+        "--result-tag",
+        default="baseline",
+        help="File name prefix for result outputs in outputs/.",
+    )
+    parser.add_argument(
+        "--n-long",
+        type=int,
+        default=None,
+        help="Optional override for number of long positions.",
+    )
+    parser.add_argument(
+        "--min-unique-securities",
+        type=int,
+        default=None,
+        help="Optional override for minimum unique holdings.",
+    )
     args = parser.parse_args()
+
+    overrides: dict[str, object] = {}
+    if args.n_long is not None:
+        overrides["N_LONG"] = int(args.n_long)
+    if args.min_unique_securities is not None:
+        overrides["MIN_UNIQUE_SECURITIES"] = int(args.min_unique_securities)
+
     main(
         force_weekly_report=args.force_weekly_report,
         refresh_data=not args.no_refresh_data,
         ticker_source=args.ticker_source,
         strict_membership=args.strict_membership,
         refresh_membership=not args.no_refresh_membership,
+        model_name=args.model_name,
+        result_tag=args.result_tag,
+        config_overrides=overrides,
     )
